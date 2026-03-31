@@ -1,0 +1,30 @@
+// swift-tools-version: 6.3
+
+import PackageDescription
+
+let package = Package(
+    name: "ClaudeStand",
+    platforms: [.iOS(.v26), .macOS(.v26)],
+    products: [
+        .library(
+            name: "ClaudeStand",
+            targets: ["ClaudeStand"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/1amageek/swift-bun.git", branch: "main"),
+    ],
+    targets: [
+        .target(
+            name: "ClaudeStand",
+            dependencies: [
+                .product(name: "BunRuntime", package: "swift-bun"),
+            ]
+        ),
+        .testTarget(
+            name: "ClaudeStandTests",
+            dependencies: ["ClaudeStand"]
+        ),
+    ],
+    swiftLanguageModes: [.v6]
+)

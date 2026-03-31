@@ -1,0 +1,15 @@
+{
+  "originHash" : "5e059b30081ccb24b3b5f7e4003762f8a6ce153d9b8c14ebb89adea1bea69c66",
+  "pins" : [
+    {
+      "identity" : "swift-bun",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/1amageek/swift-bun.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "8a5def15f9f5459a0610d484ca19e8b15692525f"
+      }
+    }
+  ],
+  "version" : 3
+}
