@@ -1,111 +1,102 @@
-import Testing
 import Foundation
+import Testing
 @testable import ClaudeStand
 
 @Suite("PackageManager")
 struct PackageManagerTests {
+    @Test("manual policy uses cache when cli.js already exists")
+    func manualUsesCache() async throws {
+        let cacheDirectory = try Self.makeTempDirectory()
+        try Self.installPackage(version: "1.0.0", into: cacheDirectory)
 
-    @Test("Initial state has no installed version in empty directory")
-    func initialState() async throws {
-        let pm = makePM()
-        let version = await pm.installedVersion
-        #expect(version == nil)
-        let path = await pm.cliJSPath
-        #expect(path == nil)
-    }
-
-    @Test("installedVersion reads version from package.json")
-    func installedVersionReads() async throws {
-        let dir = makeTempDir()
-        let packageDir = dir.appendingPathComponent("package")
-        try FileManager.default.createDirectory(at: packageDir, withIntermediateDirectories: true)
-        let packageJSON: [String: Any] = ["name": "@anthropic-ai/claude-code", "version": "2.1.88"]
-        let data = try JSONSerialization.data(withJSONObject: packageJSON)
-        try data.write(to: packageDir.appendingPathComponent("package.json"))
-
-        let pm = PackageManager(cacheDirectory: dir)
-        let version = await pm.installedVersion
-        #expect(version == "2.1.88")
-    }
-
-    @Test("cliJSPath returns path when cli.js exists")
-    func cliJSPathExists() async throws {
-        let dir = makeTempDir()
-        let cliPath = dir.appendingPathComponent("package/cli.js")
-        try FileManager.default.createDirectory(
-            at: cliPath.deletingLastPathComponent(), withIntermediateDirectories: true
+        let tracker = FetchTracker()
+        let manager = PackageManager(
+            cacheDirectory: cacheDirectory,
+            registryFetcher: { version in
+                await tracker.recordFetch(version)
+                return PackageManager.RegistryInfo(version: "2.0.0", tarballURL: URL(string: "https://example.com/latest.tgz")!)
+            },
+            tarballDownloader: { _ in
+                await tracker.recordDownload()
+                return try Self.makeTarball(version: "2.0.0")
+            }
         )
-        try Data("#!/usr/bin/env node".utf8).write(to: cliPath)
 
-        let pm = PackageManager(cacheDirectory: dir)
-        let path = await pm.cliJSPath
-        #expect(path != nil)
-        #expect(path?.lastPathComponent == "cli.js")
+        let path = try await manager.resolveCLIPath(policy: .manual)
+
+        #expect(path.lastPathComponent == "cli.js")
+        #expect(await tracker.fetchRequests == [])
+        #expect(await tracker.downloadCount == 0)
+        #expect(await manager.installedVersion == "1.0.0")
     }
 
-    @Test("cliJSPath returns nil when cli.js missing")
-    func cliJSPathMissing() async throws {
-        let dir = makeTempDir()
-        let pm = PackageManager(cacheDirectory: dir)
-        let path = await pm.cliJSPath
-        #expect(path == nil)
+    @Test("checkOnStart installs latest when versions differ")
+    func checkOnStartInstallsLatest() async throws {
+        let cacheDirectory = try Self.makeTempDirectory()
+        try Self.installPackage(version: "1.0.0", into: cacheDirectory)
+
+        let tracker = FetchTracker()
+        let manager = PackageManager(
+            cacheDirectory: cacheDirectory,
+            registryFetcher: { version in
+                await tracker.recordFetch(version)
+                return PackageManager.RegistryInfo(version: "2.0.0", tarballURL: URL(string: "https://example.com/latest.tgz")!)
+            },
+            tarballDownloader: { _ in
+                await tracker.recordDownload()
+                return try Self.makeTarball(version: "2.0.0")
+            }
+        )
+
+        let path = try await manager.resolveCLIPath(policy: .checkOnStart)
+
+        #expect(path.lastPathComponent == "cli.js")
+        #expect(await tracker.fetchRequests == [nil])
+        #expect(await tracker.downloadCount == 1)
+        #expect(await manager.installedVersion == "2.0.0")
     }
 
-    @Test("checkForUpdate fetches latest version from npm registry")
-    func checkForUpdate() async throws {
-        let pm = makePM()
-        let info = try await pm.checkForUpdate()
-        #expect(!info.latestVersion.isEmpty)
-        #expect(info.latestVersion.contains("."))
-        #expect(info.isUpdateAvailable == true)  // empty cache → always an update
-        #expect(info.currentVersion == nil)
+    @Test("pinned policy resolves the requested version")
+    func pinnedVersion() async throws {
+        let cacheDirectory = try Self.makeTempDirectory()
+        let tracker = FetchTracker()
+        let manager = PackageManager(
+            cacheDirectory: cacheDirectory,
+            registryFetcher: { version in
+                await tracker.recordFetch(version)
+                return PackageManager.RegistryInfo(version: version ?? "unexpected", tarballURL: URL(string: "https://example.com/pinned.tgz")!)
+            },
+            tarballDownloader: { _ in
+                await tracker.recordDownload()
+                return try Self.makeTarball(version: "3.1.4")
+            }
+        )
+
+        _ = try await manager.resolveCLIPath(policy: .pinned(version: "3.1.4"))
+
+        #expect(await tracker.fetchRequests == ["3.1.4"])
+        #expect(await manager.installedVersion == "3.1.4")
     }
 
-    @Test("ensureInstalled downloads and extracts package")
-    func ensureInstalled() async throws {
-        let dir = makeTempDir()
-        let pm = PackageManager(cacheDirectory: dir)
+    @Test("checkForUpdate reports version differences")
+    func updateInfo() async throws {
+        let cacheDirectory = try Self.makeTempDirectory()
+        try Self.installPackage(version: "1.0.0", into: cacheDirectory)
 
-        let cliPath = try await pm.ensureInstalled()
-        #expect(FileManager.default.fileExists(atPath: cliPath.path))
-        #expect(cliPath.lastPathComponent == "cli.js")
+        let manager = PackageManager(
+            cacheDirectory: cacheDirectory,
+            registryFetcher: { _ in
+                PackageManager.RegistryInfo(version: "2.0.0", tarballURL: URL(string: "https://example.com/latest.tgz")!)
+            },
+            tarballDownloader: { _ in
+                try Self.makeTarball(version: "2.0.0")
+            }
+        )
 
-        let version = await pm.installedVersion
-        #expect(version != nil)
-        #expect(version!.contains("."))
-    }
-
-    @Test("ensureInstalled uses cache on second call")
-    func ensureInstalledCache() async throws {
-        let dir = makeTempDir()
-        let pm = PackageManager(cacheDirectory: dir)
-
-        let path1 = try await pm.ensureInstalled()
-        let path2 = try await pm.ensureInstalled()
-        #expect(path1 == path2)
-    }
-
-    @Test("ensureInstalled with forceUpdate redownloads")
-    func ensureInstalledForceUpdate() async throws {
-        let dir = makeTempDir()
-        let pm = PackageManager(cacheDirectory: dir)
-
-        let path1 = try await pm.ensureInstalled()
-        #expect(FileManager.default.fileExists(atPath: path1.path))
-
-        let path2 = try await pm.ensureInstalled(forceUpdate: true)
-        #expect(FileManager.default.fileExists(atPath: path2.path))
-    }
-
-    @Test("Extraction removes sharp native binaries")
-    func extractionRemovesSharp() async throws {
-        let dir = makeTempDir()
-        let pm = PackageManager(cacheDirectory: dir)
-
-        _ = try await pm.ensureInstalled()
-
-        let sharpDir = dir.appendingPathComponent("package/node_modules/@img")
-        #expect(!FileManager.default.fileExists(atPath: sharpDir.path))
+        let info = try await manager.checkForUpdate()
+        #expect(info.currentVersion == "1.0.0")
+        #expect(info.latestVersion == "2.0.0")
+        #expect(info.isUpdateAvailable == true)
     }
 
     @Test("PackageError descriptions are meaningful")
@@ -118,38 +109,57 @@ struct PackageManagerTests {
             .decompressionFailed,
         ]
         for error in errors {
-            #expect(error.errorDescription != nil)
-            #expect(!error.errorDescription!.isEmpty)
+            #expect(error.errorDescription?.isEmpty == false)
         }
     }
 
-    @Test("UpdateInfo reports correctly")
-    func updateInfo() {
-        let noUpdate = PackageManager.UpdateInfo(
-            currentVersion: "2.1.88",
-            latestVersion: "2.1.88",
-            isUpdateAvailable: false
-        )
-        #expect(!noUpdate.isUpdateAvailable)
-
-        let hasUpdate = PackageManager.UpdateInfo(
-            currentVersion: "2.1.87",
-            latestVersion: "2.1.88",
-            isUpdateAvailable: true
-        )
-        #expect(hasUpdate.isUpdateAvailable)
+    private static func installPackage(version: String, into cacheDirectory: URL) throws {
+        let packageDirectory = cacheDirectory.appendingPathComponent("package", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDirectory, withIntermediateDirectories: true)
+        try Data(#"console.log("cli")"#.utf8)
+            .write(to: packageDirectory.appendingPathComponent("cli.js"), options: .atomic)
+        try Data(#"{"name":"@anthropic-ai/claude-code","version":"\#(version)"}"#.utf8)
+            .write(to: packageDirectory.appendingPathComponent("package.json"), options: .atomic)
     }
 
-    // MARK: - Helpers
+    private static func makeTarball(version: String) throws -> Data {
+        let root = try makeTempDirectory()
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let packageDirectory = source.appendingPathComponent("package", isDirectory: true)
+        try FileManager.default.createDirectory(at: packageDirectory, withIntermediateDirectories: true)
+        try Data(#"console.log("cli")"#.utf8)
+            .write(to: packageDirectory.appendingPathComponent("cli.js"), options: .atomic)
+        try Data(#"{"name":"@anthropic-ai/claude-code","version":"\#(version)"}"#.utf8)
+            .write(to: packageDirectory.appendingPathComponent("package.json"), options: .atomic)
 
-    private func makePM() -> PackageManager {
-        PackageManager(cacheDirectory: makeTempDir())
+        let tarball = root.appendingPathComponent("package.tgz", isDirectory: false)
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        process.arguments = ["czf", tarball.path, "-C", source.path, "package"]
+        try process.run()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+        return try Data(contentsOf: tarball)
     }
 
-    private func makeTempDir() -> URL {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("claudestand-test-\(UUID().uuidString.prefix(8))")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir
+    private static func makeTempDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claudestand-package-tests", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+}
+
+private actor FetchTracker {
+    private(set) var fetchRequests: [String?] = []
+    private(set) var downloadCount = 0
+
+    func recordFetch(_ version: String?) {
+        fetchRequests.append(version)
+    }
+
+    func recordDownload() {
+        downloadCount += 1
     }
 }

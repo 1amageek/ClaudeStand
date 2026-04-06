@@ -1,279 +1,137 @@
 import Foundation
-import AuthenticationServices
-import Security
-import os.log
 
-private let logger = Logger(subsystem: "com.claudestand", category: "Auth")
-
-/// Manages OAuth authentication for Claude Code.
+/// Reads Claude OAuth credentials from a platform-specific credential source.
 ///
-/// Performs the OAuth flow via `ASWebAuthenticationSession`, stores tokens
-/// in the Keychain under the same service name Claude Code CLI uses
-/// (`"Claude Code-credentials"`), so the CLI picks them up automatically.
+/// - macOS default: shared Claude Code CLI Keychain entry
+/// - iOS / iPadOS / visionOS default: app-owned managed credential store
 ///
-/// API key authentication is intentionally unsupported.
-public actor AuthSession {
-
-    /// Keychain service name matching what Claude Code CLI uses.
-    private static let keychainService = "Claude Code-credentials"
-
-    /// The account name for the Keychain entry.
-    private let keychainAccount: String
-
-    private var cachedCredentials: Credentials?
-
-    public init(account: String = "default") {
-        self.keychainAccount = account
+/// ClaudeStand always materializes the returned JSON into a managed
+/// `.claude/.credentials.json` for the embedded CLI runtime. API key based
+/// authentication is intentionally unsupported.
+public actor AuthSession: ClaudeAuthenticating {
+    private struct CredentialStore: Sendable {
+        let rawData: Data
+        let credentials: ClaudeOAuthCredentials
     }
 
-    /// Whether stored credentials exist.
+    private let provider: any ClaudeCredentialStoreProviding
+    private var cachedCredentialStore: CredentialStore?
+
+    public init(
+        account: String = "default",
+        location: ClaudeStandStorageLocation? = nil
+    ) {
+        self.provider = Self.makeDefaultProvider(account: account, location: location)
+    }
+
+    public init(provider: any ClaudeCredentialStoreProviding) {
+        self.provider = provider
+    }
+
+    /// Whether stored credentials exist and have not expired.
     public var isAuthenticated: Bool {
-        get async {
-            if cachedCredentials != nil { return true }
-            do {
-                cachedCredentials = try loadFromKeychain()
-                return cachedCredentials != nil
-            } catch {
-                return false
-            }
+        do {
+            let creds = try loadCredentialStore().credentials
+            return creds.isClaudeCodeAuthenticated
+        } catch {
+            return false
         }
     }
 
-    /// Perform OAuth login via the system browser.
-    ///
-    /// Opens `ASWebAuthenticationSession` to authenticate with Claude's
-    /// OAuth provider. On success, stores the credentials in the Keychain.
-    public func login(anchor: ASPresentationAnchor) async throws {
-        let authURL = try buildAuthorizationURL()
-        let callbackScheme = "claude-code"
-
-        let callbackURL: URL = try await withCheckedThrowingContinuation { continuation in
-            let session = ASWebAuthenticationSession(
-                url: authURL,
-                callbackURLScheme: callbackScheme
-            ) { url, error in
-                if let error {
-                    continuation.resume(throwing: AuthError.authenticationFailed(underlying: error))
-                    return
-                }
-                guard let url else {
-                    continuation.resume(throwing: AuthError.missingCallbackURL)
-                    return
-                }
-                continuation.resume(returning: url)
-            }
-
-            let delegate = PresentationDelegate(anchor: anchor)
-            session.presentationContextProvider = delegate
-            session.prefersEphemeralWebBrowserSession = false
-
-            if !session.start() {
-                continuation.resume(throwing: AuthError.sessionStartFailed)
-            }
+    /// Returns the current OAuth access token from the configured credential store.
+    public func accessToken() async throws -> String {
+        let creds = try await oauthCredentials()
+        if creds.isExpired {
+            throw ClaudeAuthenticationError.expiredCredentials(expiresAt: creds.expiresAt)
         }
-
-        let credentials = try await exchangeCodeForToken(callbackURL: callbackURL)
-        try saveToKeychain(credentials)
-        cachedCredentials = credentials
-        logger.info("OAuth login successful")
-    }
-
-    /// Clear stored tokens and log out.
-    public func logout() throws {
-        cachedCredentials = nil
-        try deleteFromKeychain()
-        logger.info("Logged out")
-    }
-
-    /// Returns the current access token, refreshing if needed.
-    func accessToken() throws -> String {
-        if let creds = cachedCredentials {
-            return creds.accessToken
+        if creds.hasRequiredScope == false {
+            throw ClaudeAuthenticationError.missingRequiredScope(scopes: creds.scopes)
         }
-        let creds = try loadFromKeychain()
-        cachedCredentials = creds
         return creds.accessToken
     }
 
-    // MARK: - Private
-
-    private func buildAuthorizationURL() throws -> URL {
-        // Claude OAuth authorization endpoint
-        // The exact URL/parameters will need to match Claude's OAuth implementation
-        var components = URLComponents()
-        components.scheme = "https"
-        components.host = "claude.ai"
-        components.path = "/oauth/authorize"
-        components.queryItems = [
-            URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "client_id", value: "claude-code"),
-            URLQueryItem(name: "redirect_uri", value: "claude-code://oauth/callback"),
-            URLQueryItem(name: "scope", value: "claude-code"),
-        ]
-
-        guard let url = components.url else {
-            throw AuthError.invalidAuthURL
-        }
-        return url
+    /// Returns the parsed OAuth credentials from the shared credential store.
+    public func oauthCredentials() async throws -> ClaudeOAuthCredentials {
+        try loadCredentialStore().credentials
     }
 
-    private func exchangeCodeForToken(callbackURL: URL) async throws -> Credentials {
-        guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false),
-              let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
-            throw AuthError.missingAuthorizationCode
-        }
-
-        // Exchange authorization code for access token
-        var request = URLRequest(url: URL(string: "https://claude.ai/oauth/token")!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: String] = [
-            "grant_type": "authorization_code",
-            "code": code,
-            "client_id": "claude-code",
-            "redirect_uri": "claude-code://oauth/callback",
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200..<300).contains(httpResponse.statusCode) else {
-            throw AuthError.tokenExchangeFailed
-        }
-
-        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
-
-        guard let accessToken = json["access_token"] as? String else {
-            throw AuthError.tokenExchangeFailed
-        }
-
-        let refreshToken = json["refresh_token"] as? String
-        let expiresIn = json["expires_in"] as? Int
-
-        return Credentials(
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            expiresAt: expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
-        )
+    /// Returns the raw credential store JSON for `.claude/.credentials.json`.
+    public func credentialStoreData() async throws -> Data {
+        try loadCredentialStore().rawData
     }
 
-    // MARK: - Keychain
+    /// Clear cached credentials (does not delete from Keychain).
+    public func clearCache() async {
+        cachedCredentialStore = nil
+    }
 
-    private func saveToKeychain(_ credentials: Credentials) throws {
-        let data = try JSONEncoder().encode(credentials)
+    // MARK: - Credential Store
 
-        // Delete existing entry first
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: keychainAccount,
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-
-        let status = SecItemAdd(addQuery as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw AuthError.keychainSaveFailed(status: status)
+    private func loadCredentialStore() throws -> CredentialStore {
+        if let cached = cachedCredentialStore {
+            return cached
         }
+        let store = try readFromProvider()
+        cachedCredentialStore = store
+        return store
     }
 
-    private func loadFromKeychain() throws -> Credentials {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: keychainAccount,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-
-        var result: AnyObject?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-
-        guard status == errSecSuccess, let data = result as? Data else {
-            throw AuthError.keychainLoadFailed(status: status)
+    private static func makeDefaultProvider(
+        account: String,
+        location: ClaudeStandStorageLocation?
+    ) -> any ClaudeCredentialStoreProviding {
+        #if os(macOS)
+        let resolvedLocation = location
+            ?? (try? ClaudeStandStorageLocation.applicationSupport())
+        if let resolvedLocation {
+            let store = ManagedCredentialStore(location: resolvedLocation)
+            return CachedCredentialStoreProvider(
+                store: store,
+                runtimeCredentialsFile: resolvedLocation.runtimeCredentialsFile,
+                fallback: KeychainCredentialStoreProvider(account: account)
+            )
         }
-
-        return try JSONDecoder().decode(Credentials.self, from: data)
-    }
-
-    private func deleteFromKeychain() throws {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: Self.keychainService,
-            kSecAttrAccount as String: keychainAccount,
-        ]
-
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw AuthError.keychainDeleteFailed(status: status)
-        }
-    }
-
-    // MARK: - Types
-
-    struct Credentials: Codable, Sendable {
-        var accessToken: String
-        var refreshToken: String?
-        var expiresAt: Date?
-    }
-
-    // MARK: - Errors
-
-    public enum AuthError: Error, LocalizedError {
-        case invalidAuthURL
-        case authenticationFailed(underlying: Error)
-        case missingCallbackURL
-        case sessionStartFailed
-        case missingAuthorizationCode
-        case tokenExchangeFailed
-        case keychainSaveFailed(status: OSStatus)
-        case keychainLoadFailed(status: OSStatus)
-        case keychainDeleteFailed(status: OSStatus)
-
-        public var errorDescription: String? {
-            switch self {
-            case .invalidAuthURL:
-                "Failed to construct OAuth authorization URL"
-            case .authenticationFailed(let error):
-                "Authentication failed: \(error.localizedDescription)"
-            case .missingCallbackURL:
-                "No callback URL received from OAuth provider"
-            case .sessionStartFailed:
-                "Failed to start authentication session"
-            case .missingAuthorizationCode:
-                "Authorization code missing from callback URL"
-            case .tokenExchangeFailed:
-                "Failed to exchange authorization code for token"
-            case .keychainSaveFailed(let status):
-                "Failed to save to Keychain (OSStatus: \(status))"
-            case .keychainLoadFailed(let status):
-                "Failed to load from Keychain (OSStatus: \(status))"
-            case .keychainDeleteFailed(let status):
-                "Failed to delete from Keychain (OSStatus: \(status))"
+        return KeychainCredentialStoreProvider(account: account)
+        #else
+        do {
+            let store: ManagedCredentialStore
+            if let location {
+                store = ManagedCredentialStore(location: location)
+            } else {
+                store = try ManagedCredentialStore()
             }
+            return ManagedCredentialStoreProvider(store: store)
+        } catch {
+            return UnavailableCredentialStoreProvider()
+        }
+        #endif
+    }
+
+    private func readFromProvider() throws -> CredentialStore {
+        let data = try provider.credentialStoreData()
+        do {
+            let document = try JSONDecoder().decode(ClaudeCredentialStoreDocument.self, from: data)
+            guard document.claudeAiOauth.accessToken.isEmpty == false else {
+                throw ClaudeAuthenticationError.malformedCredentials
+            }
+            guard document.claudeAiOauth.hasRequiredScope else {
+                throw ClaudeAuthenticationError.missingRequiredScope(scopes: document.claudeAiOauth.scopes)
+            }
+
+            return CredentialStore(
+                rawData: data,
+                credentials: document.claudeAiOauth
+            )
+        } catch let error as ClaudeAuthenticationError {
+            throw error
+        } catch {
+            throw ClaudeAuthenticationError.malformedCredentials
         }
     }
 }
 
-// MARK: - ASWebAuthenticationSession Presentation
-
-private final class PresentationDelegate: NSObject, ASWebAuthenticationPresentationContextProviding, Sendable {
-    private let anchor: ASPresentationAnchor
-
-    init(anchor: ASPresentationAnchor) {
-        self.anchor = anchor
-    }
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        anchor
+private struct UnavailableCredentialStoreProvider: ClaudeCredentialStoreProviding {
+    func credentialStoreData() throws -> Data {
+        throw ClaudeAuthenticationError.managedCredentialStoreUnavailable
     }
 }

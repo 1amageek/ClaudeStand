@@ -1,6 +1,6 @@
-# CLAUDE.md
+# AGENTS.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
 ## Build & Test
 
@@ -36,10 +36,10 @@ ClaudeRuntime (actor)
 
 ### Key components
 
-- **ClaudeRuntime** (actor) — Public API. `send(prompt:images:options:)` returns `ClaudeTurnHandle` with `messages` and `activity` streams.
-- **ClaudeProcessSession** — Resolves package policy, syncs runtime credentials, and owns raw stdout/diagnostic/exit streams for one turn process.
+- **ClaudeRuntime** (actor) — Public API. `send(prompt:images:options:)` returns `ClaudeTurnHandle` with independent `messages` and `activity` streams.
+- **ClaudeProcessSession** — Resolves package policy, syncs managed credentials into runtime `HOME`, and owns raw stdout/diagnostic/exit streams for a single turn process.
 - **ClaudeConversationRuntime** — Reduces raw protocol lines into `ClaudeMessageEvent`.
-- **ClaudeActivityRuntime** — Reduces tool usage, diagnostics, warnings, and protocol anomalies into `ClaudeActivityEvent`.
+- **ClaudeActivityRuntime** — Reduces tool execution, warnings, diagnostics, and protocol anomalies into `ClaudeActivityEvent`.
 - **BunRuntime / BunContext** (from `swift-bun`) — runtime that loads `cli.js` into JSContext with full Node.js/Bun compatibility. `fetch()` bridges to `URLSession`.
 - **PackageManager** (actor) — Resolves the Claude package using `ClaudePackagePolicy` (`manual`, `checkOnStart`, `pinned(version:)`).
 - **ClaudeConfiguration** — Model, workingDirectory, allowedTools, maxTurns, systemPrompt, package policy, etc. `iPadTools` preset excludes Bash. `cliArguments()` builds `process.argv`.
@@ -47,7 +47,6 @@ ClaudeRuntime (actor)
 - **SDKUserMessageBuilder** — Builds `SDKUserMessage` JSON with text and image content blocks.
 - **AuthSession** (actor) — Reads OAuth credentials from platform-specific sources. On macOS it prefers managed and runtime-cached credential stores before falling back to the shared Claude Code CLI Keychain entry.
 - **ManagedAuthSession** — App-owned credential manager for persisting OAuth results into `Application Support/ClaudeStand/auth/.credentials.json`.
-- **ClaudeRuntimeHome** — Builds an isolated managed `HOME` with `.claude/.credentials.json`, minimal settings, and no env-based auth fallback.
 - **CredentialSyncService** — Syncs auth store data into runtime `.claude/.credentials.json` using payload hashes, not expiry checks.
 
 ### IPC protocol
@@ -69,10 +68,10 @@ SDKUserMessage content blocks with base64-encoded images:
 
 ### Design constraints
 
-- OAuth only — no API key support, no env-based auth fallback
+- OAuth only — no API key support
 - Default tool allowlist excludes Bash via `ClaudeConfiguration.iPadTools`
 - `--tools` restricts available tools, `--allowedTools` auto-approves them
-- Runtime `HOME` is isolated and env-based auth variables are stripped before launch
+- Runtime `HOME` is always isolated and env-based auth variables are stripped before launch
 - Native `claude` process execution is forbidden in this repository. If Bun-backed `cli.js` execution is broken on macOS, fix the Bun path instead of adding a fallback.
 
 ## Platforms

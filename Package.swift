@@ -12,7 +12,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/1amageek/swift-bun.git", branch: "main"),
+        .package(path: "../swift-bun"),
     ],
     targets: [
         .target(

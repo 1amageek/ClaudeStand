@@ -101,55 +101,50 @@ struct SDKUserMessageBuilderTests {
 
     // MARK: - Round-trip: Builder output → Parser can process the response
 
-    @Test("Built message triggers parseable response cycle")
+    @Test("Built message is compatible with the raw parser")
     func roundTripWithParser() throws {
-        // 1. Build a user message
         let data = try builder.build(prompt: "Hello", sessionID: "rt-session")
         let json = try parse(data)
-
-        // 2. Verify it's a valid SDKUserMessage that the CLI would accept
         #expect(json["type"] as? String == "user")
         let message = json["message"] as? [String: Any]
         #expect(message?["role"] as? String == "user")
-
-        // 3. Simulate the CLI responding with stream-json events for this session
-        let parser = StreamEventParser()
+        let parser = RawClaudeEventParser()
 
         let systemLine = """
         {"type":"system","session_id":"rt-session","cwd":"/tmp","model":"test","tools":[],"mcp_servers":[],"permissionMode":"default"}
         """
         let systemEvent = try parser.parse(systemLine)
-        guard case .system(let sys) = systemEvent else {
+        guard case .system(let session) = systemEvent else {
             Issue.record("Expected system event")
             return
         }
-        #expect(sys.sessionID == "rt-session")
+        #expect(session.sessionID == "rt-session")
 
         let textLine = """
         {"type":"stream_event","session_id":"rt-session","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi!"}}}
         """
         let textEvent = try parser.parse(textLine)
-        guard case .streamEvent(let delta) = textEvent else {
+        guard case .stream(let stream) = textEvent else {
             Issue.record("Expected stream event")
             return
         }
-        guard case .textDelta(_, let text) = delta.event else {
+        guard case .contentBlockDelta(_, let delta) = stream.event else {
             Issue.record("Expected text delta")
             return
         }
-        #expect(text == "Hi!")
+        #expect(delta == .text("Hi!"))
 
         let resultLine = """
         {"type":"result","session_id":"rt-session","result":"Hi!","is_error":false,"stop_reason":"end_turn","total_cost_usd":0.001,"duration_ms":50,"num_turns":1}
         """
         let resultEvent = try parser.parse(resultLine)
-        guard case .result(let res) = resultEvent else {
+        guard case .result(let result) = resultEvent else {
             Issue.record("Expected result event")
             return
         }
-        #expect(res.sessionID == "rt-session")
-        #expect(res.result == "Hi!")
-        #expect(res.numTurns == 1)
+        #expect(result.sessionID == "rt-session")
+        #expect(result.result == "Hi!")
+        #expect(result.numTurns == 1)
     }
 
     @Test("Built image message has valid Anthropic API structure")

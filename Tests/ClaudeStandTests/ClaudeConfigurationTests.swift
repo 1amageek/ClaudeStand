@@ -9,9 +9,20 @@ struct ClaudeConfigurationTests {
         let config = ClaudeConfiguration()
         #expect(config.allowedTools == ClaudeConfiguration.iPadTools)
         #expect(config.dangerouslySkipPermissions == true)
+        #expect(config.packageUpdatePolicy == .checkOnStart)
+        #expect(config.diagnosticsEnabled == false)
         #expect(config.model == nil)
         #expect(config.maxTurns == nil)
         #expect(config.workingDirectory == nil)
+        #expect(config.settingSources.isEmpty)
+        #expect(config.strictMCPConfig == false)
+        #expect(config.disableSlashCommands == false)
+    }
+
+    @Test("text-only prompts prefer inline transport")
+    func inlineTransportPreferred() {
+        let config = ClaudeConfiguration()
+        #expect(config.prefersInlinePromptTransport == true)
     }
 
     @Test("iPad tools exclude Bash")
@@ -25,56 +36,73 @@ struct ClaudeConfigurationTests {
         #expect(tools.contains("Grep"))
     }
 
-    @Test("processArgv starts with node claude -p")
-    func processArgvPrefix() {
+    @Test("cliArguments starts with -p")
+    func cliArgumentsPrefix() {
         let config = ClaudeConfiguration()
-        let argv = config.processArgv()
-        #expect(argv[0] == "node")
-        #expect(argv[1] == "claude")
-        #expect(argv[2] == "-p")
+        let argv = config.cliArguments()
+        #expect(argv[0] == "-p")
     }
 
-    @Test("processArgv includes stream-json flags")
-    func processArgvStreamJson() {
+    @Test("cliArguments includes stream-json flags")
+    func cliArgumentsStreamJson() {
         let config = ClaudeConfiguration()
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         #expect(argv.contains("--input-format"))
         #expect(argv.contains("stream-json"))
         #expect(argv.contains("--output-format"))
+        // --verbose is always present for structured output parsing.
         #expect(argv.contains("--verbose"))
+        // --debug is only present when diagnosticsEnabled is true.
+        #expect(!argv.contains("--debug"))
     }
 
-    @Test("processArgv includes model when set")
-    func processArgvModel() {
+    @Test("cliArguments includes verbose flags only when diagnostics are enabled")
+    func cliArgumentsVerboseWhenDiagnosticsEnabled() {
+        let config = ClaudeConfiguration(diagnosticsEnabled: true)
+        let argv = config.cliArguments()
+        #expect(argv.contains("--verbose"))
+        #expect(argv.contains("--debug"))
+    }
+
+    @Test("cliArguments omits input-format when prompt is inline")
+    func cliArgumentsInlinePrompt() {
+        let config = ClaudeConfiguration()
+        let argv = config.cliArguments(prompt: "hello")
+        #expect(!argv.contains("--input-format"))
+        #expect(argv.starts(with: ["-p", "hello"]))
+    }
+
+    @Test("cliArguments includes model when set")
+    func cliArgumentsModel() {
         var config = ClaudeConfiguration()
         config.model = "claude-sonnet-4-6"
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         #expect(argv.contains("--model"))
         #expect(argv.contains("claude-sonnet-4-6"))
     }
 
-    @Test("processArgv includes resume session ID")
-    func processArgvResume() {
+    @Test("cliArguments includes resume token")
+    func cliArgumentsResume() {
         let config = ClaudeConfiguration()
-        let argv = config.processArgv(resumeSessionID: "session-abc")
+        let argv = config.cliArguments(resumeToken: "session-abc")
         #expect(argv.contains("--resume"))
         #expect(argv.contains("session-abc"))
     }
 
-    @Test("processArgv includes max turns")
-    func processArgvMaxTurns() {
+    @Test("cliArguments includes max turns")
+    func cliArgumentsMaxTurns() {
         var config = ClaudeConfiguration()
         config.maxTurns = 5
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         #expect(argv.contains("--max-turns"))
         #expect(argv.contains("5"))
     }
 
-    @Test("processArgv includes --tools and --allowedTools")
-    func processArgvTools() {
+    @Test("cliArguments includes --tools and --allowedTools")
+    func cliArgumentsTools() {
         var config = ClaudeConfiguration()
         config.allowedTools = ["Read", "Edit"]
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
 
         let toolsIndex = argv.firstIndex(of: "--tools")!
         #expect(argv[toolsIndex + 1] == "Read,Edit")
@@ -84,41 +112,61 @@ struct ClaudeConfigurationTests {
         #expect(argv.contains("Edit"))
     }
 
-    @Test("processArgv --tools uses comma-separated format")
-    func processArgvToolsFormat() {
+    @Test("cliArguments --tools uses comma-separated format")
+    func cliArgumentsToolsFormat() {
         let config = ClaudeConfiguration()
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         let toolsIndex = argv.firstIndex(of: "--tools")!
         let toolsValue = argv[toolsIndex + 1]
         #expect(toolsValue.contains(","))
         #expect(!toolsValue.contains("Bash"))
     }
 
-    @Test("processArgv includes system prompt")
-    func processArgvSystemPrompt() {
+    @Test("cliArguments includes system prompt")
+    func cliArgumentsSystemPrompt() {
         var config = ClaudeConfiguration()
         config.systemPrompt = "You are a Swift expert."
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         #expect(argv.contains("--system-prompt"))
         #expect(argv.contains("You are a Swift expert."))
     }
 
-    @Test("processArgv includes append system prompt")
-    func processArgvAppendSystemPrompt() {
+    @Test("cliArguments includes append system prompt")
+    func cliArgumentsAppendSystemPrompt() {
         var config = ClaudeConfiguration()
         config.appendSystemPrompt = "Always use TypeScript."
-        let argv = config.processArgv()
+        let argv = config.cliArguments()
         #expect(argv.contains("--append-system-prompt"))
         #expect(argv.contains("Always use TypeScript."))
     }
 
-    @Test("processArgv skip permissions when enabled")
-    func processArgvSkipPermissions() {
+    @Test("cliArguments skip permissions when enabled")
+    func cliArgumentsSkipPermissions() {
         var config = ClaudeConfiguration()
         config.dangerouslySkipPermissions = true
-        #expect(config.processArgv().contains("--dangerously-skip-permissions"))
+        #expect(config.cliArguments().contains("--dangerously-skip-permissions"))
 
         config.dangerouslySkipPermissions = false
-        #expect(!config.processArgv().contains("--dangerously-skip-permissions"))
+        #expect(!config.cliArguments().contains("--dangerously-skip-permissions"))
+    }
+
+    @Test("cliArguments includes setting source filters")
+    func cliArgumentsSettingSources() {
+        let config = ClaudeConfiguration(settingSources: [.user, .local])
+        let argv = config.cliArguments()
+        let index = argv.firstIndex(of: "--setting-sources")
+        #expect(index != nil)
+        #expect(argv[index! + 1] == "user,local")
+    }
+
+    @Test("cliArguments includes strict MCP and slash command flags")
+    func cliArgumentsStrictFlags() {
+        let config = ClaudeConfiguration(
+            strictMCPConfig: true,
+            disableSlashCommands: true
+        )
+        let argv = config.cliArguments()
+        #expect(argv.contains("--strict-mcp-config"))
+        #expect(argv.contains("--disable-slash-commands"))
     }
 }

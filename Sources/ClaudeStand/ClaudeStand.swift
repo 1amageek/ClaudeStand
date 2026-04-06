@@ -1,1 +1,1 @@
-// ClaudeStand — Run Claude Code on Apple platforms via BunRuntime (JavaScriptCore).
+// ClaudeStand — Run Claude Code on Apple platforms exclusively through BunProcess and cli.js.
